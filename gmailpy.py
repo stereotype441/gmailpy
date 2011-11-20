@@ -1,4 +1,4 @@
-import imaplib
+import imaplib2
 import getpass
 
 class ImapDataParser(object):
@@ -87,10 +87,10 @@ assert ImapDataParser.parse('407') == (407,)
 
 password = getpass.getpass()
 
-imap = imaplib.IMAP4_SSL('imap.gmail.com', 993)
+imap = imaplib2.IMAP4_SSL('imap.gmail.com', 993)
 try:
     imap.login('stereotype441', password)
-except imaplib.IMAP4.error, e:
+except imaplib2.IMAP4.error, e:
     print 'Login failure: {0!r}'.format(e.args[0])
     exit(1)
 
