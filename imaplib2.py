@@ -96,6 +96,56 @@ Untagged_status = re.compile(r'\* (?P<data>\d+) (?P<type>[A-Z-]+)( (?P<data2>.*)
 
 
 
+class _BaseBackend(object):
+    def open(self, host = '', port = IMAP4_PORT):
+        """Setup connection to remote server on "host:port"
+            (default: localhost:standard IMAP4 port).
+        This connection will be used by the routines:
+            read, readline, send, shutdown.
+        """
+        self.host = host
+        self.port = port
+        self.sock = socket.create_connection((host, port))
+        self.file = self.sock.makefile('rb')
+
+
+    def read(self, size):
+        """Read 'size' bytes from remote."""
+        return self.file.read(size)
+
+
+    def readline(self):
+        """Read line from remote."""
+        return self.file.readline()
+
+
+    def send(self, data):
+        """Send data to remote."""
+        self.sock.sendall(data)
+
+
+    def shutdown(self):
+        """Close I/O established in "open"."""
+        self.file.close()
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except socket.error as e:
+            # The server might already have closed the connection
+            if e.errno != errno.ENOTCONN:
+                raise
+        finally:
+            self.sock.close()
+
+
+    def socket(self):
+        """Return socket instance used to connect to IMAP4 server.
+
+        socket = <instance>.socket()
+        """
+        return self.sock
+
+
+
 class IMAP4:
 
     """IMAP4 client class.
@@ -148,7 +198,10 @@ class IMAP4:
 
     mustquote = re.compile(r"[^\w!#$%&'*+,.:;<=>?^`|~-]")
 
-    def __init__(self, host = '', port = IMAP4_PORT):
+    def __init__(self, host = '', port = IMAP4_PORT, backend = None):
+        if backend is None:
+            backend = _BaseBackend()
+        self.backend = backend
         self.debug = Debug
         self.state = 'LOGOUT'
         self.literal = None             # A literal argument to a command
@@ -160,7 +213,7 @@ class IMAP4:
 
         # Open socket to server.
 
-        self.open(host, port)
+        self.backend.open(host, port)
 
         # Create unique tag for this session,
         # and compile tagged response matcher.
@@ -215,47 +268,7 @@ class IMAP4:
 
 
 
-    #       Overridable methods
-
-
-    def open(self, host = '', port = IMAP4_PORT):
-        """Setup connection to remote server on "host:port"
-            (default: localhost:standard IMAP4 port).
-        This connection will be used by the routines:
-            read, readline, send, shutdown.
-        """
-        self.host = host
-        self.port = port
-        self.sock = socket.create_connection((host, port))
-        self.file = self.sock.makefile('rb')
-
-
-    def read(self, size):
-        """Read 'size' bytes from remote."""
-        return self.file.read(size)
-
-
-    def readline(self):
-        """Read line from remote."""
-        return self.file.readline()
-
-
-    def send(self, data):
-        """Send data to remote."""
-        self.sock.sendall(data)
-
-
-    def shutdown(self):
-        """Close I/O established in "open"."""
-        self.file.close()
-        try:
-            self.sock.shutdown(socket.SHUT_RDWR)
-        except socket.error as e:
-            # The server might already have closed the connection
-            if e.errno != errno.ENOTCONN:
-                raise
-        finally:
-            self.sock.close()
+    #       Utility methods
 
 
     def socket(self):
@@ -263,11 +276,7 @@ class IMAP4:
 
         socket = <instance>.socket()
         """
-        return self.sock
-
-
-
-    #       Utility methods
+        return self.backend.socket()
 
 
     def recent(self):
@@ -534,7 +543,7 @@ class IMAP4:
         self.state = 'LOGOUT'
         try: typ, dat = self._simple_command('LOGOUT')
         except: typ, dat = 'NO', ['%s: %s' % sys.exc_info()[:2]]
-        self.shutdown()
+        self.backend.shutdown()
         if 'BYE' in self.untagged_responses:
             return 'BYE', self.untagged_responses['BYE']
         return typ, dat
@@ -854,7 +863,7 @@ class IMAP4:
                 self._log('> %s' % data)
 
         try:
-            self.send('%s%s' % (data, CRLF))
+            self.backend.send('%s%s' % (data, CRLF))
         except (socket.error, OSError), val:
             raise self.abort('socket error: %s' % val)
 
@@ -878,8 +887,8 @@ class IMAP4:
                     self._mesg('write literal size %s' % len(literal))
 
             try:
-                self.send(literal)
-                self.send(CRLF)
+                self.backend.send(literal)
+                self.backend.send(CRLF)
             except (socket.error, OSError), val:
                 raise self.abort('socket error: %s' % val)
 
@@ -958,7 +967,7 @@ class IMAP4:
                 if __debug__:
                     if self.debug >= 4:
                         self._mesg('read literal size %s' % size)
-                data = self.read(size)
+                data = self.backend.read(size)
 
                 # Store response with literal as tuple
 
@@ -1006,7 +1015,7 @@ class IMAP4:
 
     def _get_line(self):
 
-        line = self.readline()
+        line = self.backend.readline()
         if not line:
             raise self.abort('socket error: EOF')
 
@@ -1127,25 +1136,10 @@ try:
 except ImportError:
     pass
 else:
-    class IMAP4_SSL(IMAP4):
-
-        """IMAP4 client class over SSL connection
-
-        Instantiate with: IMAP4_SSL([host[, port[, keyfile[, certfile]]]])
-
-                host - host's name (default: localhost);
-                port - port number (default: standard IMAP4 SSL port).
-                keyfile - PEM formatted file that contains your private key (default: None);
-                certfile - PEM formatted certificate chain file (default: None);
-
-        for more documentation see the docstring of the parent class IMAP4.
-        """
-
-
-        def __init__(self, host = '', port = IMAP4_SSL_PORT, keyfile = None, certfile = None):
+    class _SSLBackend(object):
+        def __init__(self, keyfile = None, certfile = None):
             self.keyfile = keyfile
             self.certfile = certfile
-            IMAP4.__init__(self, host, port)
 
 
         def open(self, host = '', port = IMAP4_SSL_PORT):
@@ -1213,24 +1207,39 @@ else:
             """
             return self.sslobj
 
+
+    class IMAP4_SSL(IMAP4):
+        """IMAP4 client class over SSL connection
+
+        Instantiate with: IMAP4_SSL([host[, port[, keyfile[, certfile]]]])
+
+                host - host's name (default: localhost);
+                port - port number (default: standard IMAP4 SSL port).
+                keyfile - PEM formatted file that contains your private key (default: None);
+                certfile - PEM formatted certificate chain file (default: None);
+
+        for more documentation see the docstring of the parent class IMAP4.
+        """
+
+
+        def __init__(self, host = '', port = IMAP4_SSL_PORT, keyfile = None, certfile = None):
+            IMAP4.__init__(self, host, port, backend = _SSLBackend(keyfile, certfile))
+
+
+        def ssl(self):
+            """Return SSLObject instance used to communicate with the IMAP4 server.
+
+            ssl = ssl.wrap_socket(<instance>.socket)
+            """
+            return self.backend.ssl()
+
+
     __all__.append("IMAP4_SSL")
 
 
-class IMAP4_stream(IMAP4):
-
-    """IMAP4 client class over a stream
-
-    Instantiate with: IMAP4_stream(command)
-
-            where "command" is a string that can be passed to subprocess.Popen()
-
-    for more documentation see the docstring of the parent class IMAP4.
-    """
-
-
+class _StreamBackend(object):
     def __init__(self, command):
         self.command = command
-        IMAP4.__init__(self)
 
 
     def open(self, host = None, port = None):
@@ -1238,10 +1247,6 @@ class IMAP4_stream(IMAP4):
         This connection will be used by the routines:
             read, readline, send, shutdown.
         """
-        self.host = None        # For compatibility with parent class
-        self.port = None
-        self.sock = None
-        self.file = None
         self.process = subprocess.Popen(self.command,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             shell=True, close_fds=True)
@@ -1270,6 +1275,26 @@ class IMAP4_stream(IMAP4):
         self.readfile.close()
         self.writefile.close()
         self.process.wait()
+
+
+    def socket(self):
+        return None
+
+
+class IMAP4_stream(IMAP4):
+
+    """IMAP4 client class over a stream
+
+    Instantiate with: IMAP4_stream(command)
+
+            where "command" is a string that can be passed to subprocess.Popen()
+
+    for more documentation see the docstring of the parent class IMAP4.
+    """
+
+
+    def __init__(self, command):
+        IMAP4.__init__(self, backend = _StreamBackend(command))
 
 
 
